@@ -362,9 +362,17 @@ def fetch_analysis(analysis_id: int) -> AnalysisResult | None:
 
 
 def fetch_latest_analysis(site_id: int) -> AnalysisResult | None:
+    """读取该站点最近一次分析：按 (created_at DESC, id DESC) 取最新一条。
+
+    created_at 并列时以 id 较大者为最新，与风险历史窗口、历史保留清理的
+    “最近”选取规则一致；系统时钟回拨或旧库导入导致后插入记录的 id 较大
+    而 created_at 较早时，仍以 created_at 较新者为准。
+    """
     with connect() as con:
         row = con.execute(
-            "SELECT * FROM analyses WHERE site_id = ? ORDER BY id DESC LIMIT 1", (site_id,)
+            "SELECT * FROM analyses WHERE site_id = ?"
+            " ORDER BY created_at DESC, id DESC LIMIT 1",
+            (site_id,),
         ).fetchone()
         return _row_to_result(row) if row else None
 
@@ -460,7 +468,12 @@ def fetch_existing_site_ids(site_ids: list[int]) -> set[int]:
 
 
 def fetch_latest_analyses_for_sites(site_ids: list[int]) -> dict[int, AnalysisResult]:
-    """批量读取多个站点各自最近一次分析（每个站点取分析 id 最大的一条）。
+    """批量读取多个站点各自最近一次分析（单次查询，逐站各取一条）。
+
+    每个站点的“最近一次”按 (created_at DESC, id DESC) 选取：created_at
+    并列时以 id 较大者为最新，与单站最近分析、风险历史窗口、历史保留
+    清理的选取规则一致；系统时钟回拨或旧库导入导致后插入记录的 id 较大
+    而 created_at 较早时，仍以 created_at 较新者为准。
 
     返回 {site_id: AnalysisResult}；无分析记录的站点不出现在结果中。
     """
@@ -470,9 +483,12 @@ def fetch_latest_analyses_for_sites(site_ids: list[int]) -> dict[int, AnalysisRe
     with connect() as con:
         rows = con.execute(
             "SELECT a.* FROM analyses a"
-            " JOIN (SELECT site_id, MAX(id) AS max_id FROM analyses"
-            f"      WHERE site_id IN ({placeholders}) GROUP BY site_id) latest"
-            "  ON a.id = latest.max_id",
+            f" WHERE a.site_id IN ({placeholders})"
+            " AND a.id = ("
+            "   SELECT b.id FROM analyses b"
+            "   WHERE b.site_id = a.site_id"
+            "   ORDER BY b.created_at DESC, b.id DESC LIMIT 1"
+            " )",
             site_ids,
         ).fetchall()
     return {row["site_id"]: _row_to_result(row) for row in rows}

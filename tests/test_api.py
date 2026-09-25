@@ -2411,6 +2411,63 @@ def test_build_risk_history_treats_absent_product_as_streak_break():
     assert build_risk_history([]) == []
 
 
+# ---------------------------------------------------------------- “最近一次分析”选取规则
+
+def test_get_latest_analysis_orders_by_created_at_then_id(client):
+    # 时钟回拨/旧库导入：后插入的记录 id 较大、created_at 却较早时，
+    # “最近一次分析”按 (created_at DESC, id DESC) 选取，而非按 id 最大。
+    client.post("/sites", json=make_payload())
+    a0, a1, a2 = _create_n_analyses(client, 1, 3)
+    _set_analysis_created_at(client, a0, "2026-06-01T00:00:00.000Z")
+    _set_analysis_created_at(client, a1, "2026-09-01T00:00:00.000Z")
+    # id 最大的 a2 时间反而最早（模拟时钟回拨后写入/旧库导入）
+    _set_analysis_created_at(client, a2, "2026-01-01T00:00:00.000Z")
+
+    resp = client.get("/sites/1/analysis")
+    assert resp.status_code == 200, resp.text
+    # created_at 最新的 a1 当选，而非 id 最大的 a2
+    assert resp.json()["analysis_id"] == a1
+    assert resp.json()["created_at"] == "2026-09-01T00:00:00.000Z"
+
+    # created_at 并列时以 id 较大者为最新
+    _set_analysis_created_at(client, a2, "2026-09-01T00:00:00.000Z")
+    assert client.get("/sites/1/analysis").json()["analysis_id"] == a2
+
+
+def test_cross_site_conflicts_latest_analysis_orders_by_created_at_then_id(client):
+    # 跨站接口在一次读取中分别选出各站最新记录：id 较大但 created_at 较早
+    # 的记录（时钟回拨/旧库导入）不应被误选；created_at 并列时 id 大者胜。
+    _make_site(client, 1, carriers_hz=[100, 300, 400], scan_end_hz=10_000)
+    _make_site(client, 2, carriers_hz=[1000, 1200, 1500], scan_end_hz=10_000)
+    old_1 = _analyze(client, 1)
+    old_2 = _analyze(client, 2)
+    new_1 = _analyze(client, 1)
+    new_2 = _analyze(client, 2)
+    # 模拟时钟回拨：各站 id 最大的记录 created_at 反而更早
+    _set_analysis_created_at(client, old_1, "2026-09-01T00:00:00.000Z")
+    _set_analysis_created_at(client, old_2, "2026-09-01T00:00:00.000Z")
+    _set_analysis_created_at(client, new_1, "2026-01-01T00:00:00.000Z")
+    _set_analysis_created_at(client, new_2, "2026-01-01T00:00:00.000Z")
+
+    body = client.post(
+        "/cross-site-conflicts", json={"site_ids": [1, 2], "tolerance_hz": 10}
+    ).json()
+    assert body["analyses"] == [
+        {"site_id": 1, "analysis_id": old_1},
+        {"site_id": 2, "analysis_id": old_2},
+    ]
+
+    # created_at 并列时以 id 较大者为最新（站点 1 的 new_1 追平后当选）
+    _set_analysis_created_at(client, new_1, "2026-09-01T00:00:00.000Z")
+    body = client.post(
+        "/cross-site-conflicts", json={"site_ids": [1, 2], "tolerance_hz": 10}
+    ).json()
+    assert body["analyses"] == [
+        {"site_id": 1, "analysis_id": new_1},
+        {"site_id": 2, "analysis_id": old_2},
+    ]
+
+
 # ---------------------------------------------------------------- 现场复测扫描窗口
 
 def _set_analysis_violating_freqs(client, analysis_id, freqs):
