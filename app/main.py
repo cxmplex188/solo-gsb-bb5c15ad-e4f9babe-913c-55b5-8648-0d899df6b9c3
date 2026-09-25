@@ -403,6 +403,12 @@ def run_analyses_batch(
     response_model=AnalysisResult,
     tags=["analysis"],
     summary="查询该方案最近一次分析结果",
+    description=(
+        "按 **created_at、id 倒序**取该站点最近一次分析：created_at 最新者优先，"
+        "并列时以 id 较大者为最新（与风险历史窗口、历史保留清理的“最近”规则一致；"
+        "时钟回拨或旧库导入使 id 较大而 created_at 较早时仍以 created_at 为准）。"
+        "站点不存在或尚无分析记录时返回 404。"
+    ),
 )
 def get_latest_analysis(site_id: int) -> AnalysisResult:
     if database.fetch_site(site_id) is None:
@@ -603,7 +609,9 @@ def get_scan_windows(
     summary="跨站点互调冲突检测：近频产物配对并按连通分量聚合为冲突簇",
     description=(
         "接收 2～8 个已保存站点 ID 与频率容差 tolerance_hz（非负整数 Hz，0 表示仅"
-        "同频配对），读取各站点**最近一次**分析结果（不重新扫描）。在**不同站点**"
+        "同频配对），在**一次数据库读取**中分别选出各站点**最近一次**分析结果"
+        "（按 created_at、id 倒序：created_at 最新者优先，并列时以 id 较大者为"
+        "最新，与单站“最近一次分析”规则一致；不重新扫描）。在**不同站点**"
         "的产物之间匹配频率差绝对值不超过容差的全部配对；同一站点的产物即使近频也"
         "不直接配对，只能经其他站点的配对链式传递。配对图（节点为 (站点, 产物频率)）"
         "的每个连通分量即一个冲突簇，响应列出每簇涉及站点、产物频率、簇内最小距离与"

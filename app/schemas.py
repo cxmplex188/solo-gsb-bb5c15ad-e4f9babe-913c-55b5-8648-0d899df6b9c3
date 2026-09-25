@@ -424,7 +424,9 @@ class SiteAnalysisRef(BaseModel):
     """本次检测实际读取的站点最近一次分析的引用。"""
 
     site_id: int
-    analysis_id: int = Field(..., description="该站点最近一次（按分析 id 最大）分析记录 ID")
+    analysis_id: int = Field(
+        ..., description="该站点最近一次（按 created_at、id 倒序）分析记录 ID"
+    )
 
 
 class CrossSiteConflictsResponse(BaseModel):

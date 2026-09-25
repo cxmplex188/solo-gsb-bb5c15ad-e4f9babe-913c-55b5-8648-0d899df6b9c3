@@ -40,6 +40,22 @@ docker compose up --build
   即产物到命中对象的间距小于保护间隔时判定为违规。
 - **排序**：结果按产物频率升序；同频产物已聚合，频率唯一，排序稳定确定。
 
+## “最近一次分析”的选取规则
+
+所有读取“最近一次/最近 N 条分析”的接口统一按 **`(created_at, id)` 倒序**判定新旧：
+`created_at` 较新者优先；`created_at` 并列时以 `id` 较大者为更新。即使系统时钟回拨
+或旧库导入导致后插入记录的 `id` 较大而 `created_at` 较早，各接口也以 `created_at`
+为准，选取结果始终一致。涉及该规则的接口：
+
+- `GET /sites/{site_id}/analysis`：取该站点 `(created_at, id)` 倒序的第一条；
+- `POST /cross-site-conflicts`：在**一次数据库读取**中按同一规则分别选出各站最新记录；
+- `GET /sites/{site_id}/risk-history?limit=N`：按同一倒序取最近 N 条作为统计窗口；
+- `DELETE /sites/{site_id}/analyses/retention?keep=k`：按同一倒序保留最近 k 条。
+
+服务通过 `docker compose up --build` 一键启动后，API 位于 `http://localhost:8000`
+（宿主机端口 `8000` → 容器端口 `8000`，可在 `docker-compose.yml` 中修改），
+交互式文档见 `http://localhost:8000/docs`。
+
 ## 风险分组（risk groups）
 
 `GET /analyses/{analysis_id}/risk-groups` 仅基于**已持久化**的分析结果计算，不重新扫描：
@@ -324,7 +340,10 @@ curl -X POST http://localhost:8000/sites/1/drift-risk \
 `site_ids` 与 `tolerance_hz` **只接受 JSON 整数**：`[true, 2]` 不会被当成 `[1, 2]`，
 `tolerance_hz` 传 `true`、`10.0`、`"10"` 同样返回 `422`；参数非法时直接拒绝，
 不启动分析、不写库。读取每个站点**最近一次**分析结果（不重新扫描；
-站点不存在 → `404`，存在但尚无分析 → `404`）。
+站点不存在 → `404`，存在但尚无分析 → `404`）：各站点的“最近一次”按
+**`(created_at, id)` 倒序**在**一次数据库读取**中分别选出（`created_at` 并列时
+以 `id` 较大者为最新），与 `GET /sites/{site_id}/analysis` 的选取规则一致，
+详见[“最近一次分析”的选取规则](#最近一次分析的选取规则)。
 
 - **配对规则**：仅在**不同站点**的产物之间匹配——两个产物频率差绝对值
   `|fa − fb| ≤ tolerance_hz` 即构成一条跨站点冲突配对；**同一站点**的产物即使频率相近也
@@ -720,7 +739,7 @@ docker compose start api
 | `POST` | `/sites/{site_id}/drift-risk` | 载频独立漂移下的全频域潜在互调风险评估（不保存分析；映射缺失/重复/多余或容差非法 → 422，站点不存在 → 404） |
 | `POST` | `/sites/{site_id}/analysis` | 执行互调分析并保存结果，`201`；可选 `Idempotency-Key` 请求头：同站点重复/并发同键返回首次结果（`200`）且不新增记录，空白键 `422` |
 | `POST` | `/sites/analyses/batch` | 多站点原子批量分析：1～10 个不重复站点 ID 按输入顺序逐站分析并在同一事务内保存，`201` 返回同序结果列表；任一站点不存在 → `404` 且整批不保存，任一步骤失败整批回滚 |
-| `GET` | `/sites/{site_id}/analysis` | 查询该方案最近一次分析结果 |
+| `GET` | `/sites/{site_id}/analysis` | 查询该方案最近一次分析结果（按 created_at、id 倒序选取；无分析 → 404） |
 | `GET` | `/sites/{site_id}/analyses` | 列出该方案的全部分析记录 |
 | `GET` | `/sites/{site_id}/risk-history?limit=N` | 最近 N 条（1～100）已保存分析的违规频率历史：违规次数、最近违规时间与连续违规次数；只读不触发分析，无违规返回 `[]`，站点不存在 → 404，参数非法 → 422 |
 | `DELETE` | `/sites/{site_id}/analyses/retention?keep=k` | 按 created_at、id 倒序保留最近 keep 条分析（1～100），单事务删除旧分析及其幂等键；站点不存在 → 404，参数非法 → 422 |
@@ -728,7 +747,7 @@ docker compose start api
 | `GET` | `/analyses/{analysis_id}/risk-groups` | 按已保存分析结果生成风险分组（违规产物 ↔ 来源载频的二部图连通分量） |
 | `GET` | `/analyses/{analysis_id}/mitigation-plan?max_disabled=k` | 按已保存分析结果求最小停用载频集合（精确最小点覆盖，`max_disabled` 取 1～8；上限内无解返回 `feasible=false` 与未消除产物频率） |
 | `GET` | `/analyses/{analysis_id}/scan-windows?width_hz=w&max_windows=k` | 基于已保存分析的违规频率规划现场复测窗口（排序+动态规划精确求至多 k 个互不重叠、长度恰为 w Hz 的窗口；`width_hz` 正整数、`max_windows` 取 1～3，宽度超过扫描范围 → 422，分析不存在 → 404，无违规返回空窗口） |
-| `POST` | `/cross-site-conflicts` | 跨站点冲突检测：2～8 个站点最近分析的近频产物配对，按连通分量聚合为冲突簇（站点不存在/无分析 → 404，参数非法 → 422） |
+| `POST` | `/cross-site-conflicts` | 跨站点冲突检测：2～8 个站点最近一次分析（按 created_at、id 倒序，单次读取选出）的近频产物配对，按连通分量聚合为冲突簇（站点不存在/无分析 → 404，参数非法 → 422） |
 
 ### 示例
 
@@ -870,7 +889,7 @@ curl -X POST http://localhost:8000/maintenance/backups \
 python3 -m venv .venv && source .venv/bin/activate
 pip install -r requirements-dev.txt
 
-# 运行测试（176 个用例，覆盖创建、校验拒绝、严格 JSON 整数（布尔/浮点/数字字符串 → 422、
+# 运行测试（179 个用例，覆盖创建、校验拒绝、严格 JSON 整数（布尔/浮点/数字字符串 → 422、
 # 整批不写库不启动分析）、聚合、距离、持久化查询、风险分组、最小停用方案（含尽力方案
 # 误剪枝回归）、
 # 现场复测扫描窗口（覆盖最大化、窗口数与字典序并列、边界截断、参数校验与 404）、
@@ -878,6 +897,8 @@ pip install -r requirements-dev.txt
 # 多站点原子批量分析的顺序一致、404 整批不保存与失败整批回滚，
 # 分析历史保留清理的倒序保留、幂等键联动删除与整批回滚，
 # 站点历史风险的窗口选取、违规计数、连续计数终止与参数校验，
+# “最近一次分析”按 (created_at, id) 倒序选取（时钟回拨/旧库导入下 id 大而时间早的记录不被误选、
+# 并列时 id 决胜、跨站接口与单站接口选取一致），
 # 以及运维备份的令牌校验（未配置 503/错误 401）、快照内容与可恢复性、
 # 并发写入一致性、撞名换名重试不覆盖既有备份、并发同名发布的互不覆盖、
 # 失败只清理本次临时文件不留半成品与备份库损坏检测）
